@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script Version: 1.2.4
+# Script Version: 1.2.5
 # Purpose: Installer and manager for ddns-go
 # Author: k08255-lxm (Original), Refactored by AI
 # Ensure this script is saved with Unix line endings (LF) and UTF-8 encoding without BOM.
@@ -20,7 +20,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # --- Script Metadata & Configuration ---
-SCRIPT_VERSION="1.2.4"
+SCRIPT_VERSION="1.2.5"
 readonly SCRIPT_FILENAME=$(basename "$0")
 readonly DDNS_GO_GH_REPO="jeessy2/ddns-go"
 readonly INSTALLER_GH_REPO="k08255-lxm/ddns-go-installer"
@@ -75,7 +75,6 @@ error() { _log "ERROR" "$1"; }
 debug() { if [[ "${DEBUG_MODE:-0}" -eq 1 ]]; then _log "DEBUG" "$1"; fi }
 error_exit() { _log "ERROR" "$1"; exit 1; }
 
-# Check if running as root
 check_root() {
     if [[ "$EUID" -ne 0 ]]; then
         error_exit "此脚本需要 root 或 sudo 权限才能运行。"
@@ -83,11 +82,18 @@ check_root() {
     debug "Root check passed."
 }
 
-# Install dependencies if missing
+check_command() {
+    local cmd_name="$1"
+    if ! command -v "$cmd_name" &>/dev/null; then
+        error_exit "必需命令 '$cmd_name' 未找到。请先安装它。"
+    fi
+    debug "Command '$cmd_name' found."
+}
+
 install_dependencies() {
     info "正在检查并安装必要的依赖 (curl, tar, jq, bc)..."
     local missing_pkgs=()
-    local pkgs_to_check=("curl" "tar" "jq" "bc") # bc for floating point in speed calc
+    local pkgs_to_check=("curl" "tar" "jq" "bc")
 
     for pkg in "${pkgs_to_check[@]}"; do
         command -v "$pkg" &>/dev/null || missing_pkgs+=("$pkg")
@@ -117,25 +123,21 @@ install_dependencies() {
     esac
 
     for pkg in "${missing_pkgs[@]}"; do
-        if ! command -v "$pkg" &>/dev/null; then
-            error_exit "安装依赖 '$pkg' 失败。请手动安装后重试。"
-        fi
+        check_command "$pkg"
     done
     success "依赖安装完成。"
 }
 
-# Determine actual ddns-go binary path and config file path
 determine_paths_and_load_config() {
     debug "Determining paths and loading config..."
     DDNS_GO_BIN_PATH=$(which "${DDNS_GO_BIN_NAME}" 2>/dev/null || echo "${BIN_PATH_DEFAULT}")
 
-    # If config file exists, try to load settings from it
     if [[ -f "${CONFIG_DIR_DEFAULT}/${DDNS_GO_BIN_NAME}.conf" ]]; then
         DDNS_GO_CONFIG_FILE="${CONFIG_DIR_DEFAULT}/${DDNS_GO_BIN_NAME}.conf"
-    elif [[ -f "/etc/${DDNS_GO_BIN_NAME}.conf" ]]; then # Legacy config path
+    elif [[ -f "/etc/${DDNS_GO_BIN_NAME}.conf" ]]; then
         DDNS_GO_CONFIG_FILE="/etc/${DDNS_GO_BIN_NAME}.conf"
     else
-        DDNS_GO_CONFIG_FILE="${CONFIG_FILE_DEFAULT}" # Default if nothing else found
+        DDNS_GO_CONFIG_FILE="${CONFIG_FILE_DEFAULT}"
     fi
     debug "Using config file: ${DDNS_GO_CONFIG_FILE}"
 
@@ -150,16 +152,14 @@ determine_paths_and_load_config() {
         [[ -n "$cfg_bin_path" && -x "$cfg_bin_path" ]] && DDNS_GO_BIN_PATH="$cfg_bin_path"
         [[ -n "$cfg_port" ]] && PORT="$cfg_port"
         [[ -n "$cfg_interval" ]] && INTERVAL="$cfg_interval"
-        [[ "$cfg_noweb" == "true" ]] && NOWEB="true" || NOWEB="false" # Normalize
+        [[ "$cfg_noweb" == "true" ]] && NOWEB="true" || NOWEB="false"
         debug "Loaded from config: BIN_PATH=${DDNS_GO_BIN_PATH}, PORT=${PORT}, INTERVAL=${INTERVAL}, NOWEB=${NOWEB}"
     else
         debug "配置文件 ${DDNS_GO_CONFIG_FILE} 未找到，将使用默认值或提示输入。"
     fi
-    # Ensure BIN_PATH is updated globally
     BIN_PATH="${DDNS_GO_BIN_PATH}"
 }
 
-# Check ddns-go installation status
 check_ddns_go_installed() {
     debug "Checking ddns-go installation status..."
     determine_paths_and_load_config
@@ -169,24 +169,22 @@ check_ddns_go_installed() {
         return 0
     fi
 
-    # Check common system paths if default wasn't found by 'which'
     local common_paths=("${BIN_PATH_DEFAULT}" "/usr/bin/${DDNS_GO_BIN_NAME}" "/opt/${DDNS_GO_BIN_NAME}/${DDNS_GO_BIN_NAME}")
     for path_to_check in "${common_paths[@]}"; do
         if [[ -x "$path_to_check" ]]; then
             DDNS_GO_BIN_PATH="$path_to_check"
-            BIN_PATH="$path_to_check" # Update global
+            BIN_PATH="$path_to_check"
             debug "Found ddns-go executable at ${DDNS_GO_BIN_PATH} (common path search)"
             return 0
         fi
     done
 
-    # Check if service is running (might indicate an install not in PATH)
     if systemctl is-active --quiet "${DDNS_GO_BIN_NAME}.service"; then
         local service_exec_path
         service_exec_path=$(systemctl show "${DDNS_GO_BIN_NAME}.service" --property=ExecStart --value | awk '{print $1}')
         if [[ -n "$service_exec_path" && -x "$service_exec_path" ]]; then
             DDNS_GO_BIN_PATH="$service_exec_path"
-            BIN_PATH="$service_exec_path" # Update global
+            BIN_PATH="$service_exec_path"
             debug "Found ddns-go via active systemd service: ${DDNS_GO_BIN_PATH}"
             return 0
         fi
@@ -197,33 +195,36 @@ check_ddns_go_installed() {
     return 1
 }
 
-# Get installed ddns-go version
 get_local_ddns_go_version() {
     if ! check_ddns_go_installed; then echo "未安装"; return; fi
     if [[ ! -x "${DDNS_GO_BIN_PATH}" ]]; then echo "路径无效"; return; fi
 
     local version_output
-    version_output=$("${DDNS_GO_BIN_PATH}" -version 2>&1) || { warn "执行 '${DDNS_GO_BIN_PATH} -version' 失败"; echo "获取失败"; return; }
+    version_output=$("${DDNS_GO_BIN_PATH}" -version 2>&1) || { 
+        version_output=$("${DDNS_GO_BIN_PATH}" --version 2>&1) || {
+            warn "执行 '${DDNS_GO_BIN_PATH} -version' 失败";
+            echo "获取失败";
+            return;
+        }
+    }
     
-    # Regex to capture vX.Y.Z or X.Y.Z (and add 'v' if missing)
     local version
     version=$(echo "$version_output" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
     if [[ -n "$version" ]]; then
-        [[ "$version" != v* ]] && version="v$version" # Prepend 'v' if not present
+        [[ "$version" != v* ]] && version="v$version"
         echo "$version"
     else
         echo "版本未知"
     fi
 }
 
-# Fetch available ddns-go versions from GitHub API
 fetch_available_versions() {
     info "正在从 GitHub 获取可用的 ddns-go 版本列表..."
     local versions_json versions_list retry_count=0 max_retries=2
     while [[ $retry_count -le $max_retries ]]; do
         versions_json=$(curl -sfL --connect-timeout 10 "${DDNS_GO_API_URL}")
         if [[ -n "$versions_json" ]]; then
-            versions_list=$(echo "$versions_json" | jq -r '.[].tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))') # Filter for vX.Y.Z format
+            versions_list=$(echo "$versions_json" | jq -r '.[].tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))')
             if [[ -n "$versions_list" ]]; then
                 echo "$versions_list"
                 return 0
@@ -239,12 +240,11 @@ fetch_available_versions() {
     return 1
 }
 
-# Validate a given version string against available versions
 validate_version_exists() {
     local version_to_validate="$1"
     local available_versions
     info "正在验证版本号 ${version_to_validate}..."
-    available_versions=$(fetch_available_versions) || return 1 # Exit if fetch fails
+    available_versions=$(fetch_available_versions) || return 1
 
     if echo "$available_versions" | grep -Fxq "$version_to_validate"; then
         success "版本号 ${version_to_validate} 有效。"
@@ -257,7 +257,6 @@ validate_version_exists() {
     fi
 }
 
-# Install or update ddns-go core binary
 install_ddns_go_core() {
     local version_to_install="$1"
     info "准备安装/更新 ddns-go 至版本 ${version_to_install}"
@@ -268,7 +267,7 @@ install_ddns_go_core() {
 
     case "$cpu_arch" in
         x86_64|amd64) arch="x86_64" ;;
-        i386|i686) arch="i386" ;; # Note: 32-bit might be deprecated by ddns-go
+        i386|i686) arch="i386" ;;
         armv6l) arch="armv6" ;;
         armv7l) arch="armv7" ;;
         aarch64|arm64) arch="arm64" ;;
@@ -278,13 +277,12 @@ install_ddns_go_core() {
     case "$os_type" in
         linux*) os_type="linux" ;;
         freebsd*) os_type="freebsd" ;;
-        darwin*) os_type="darwin" ;; # macOS
+        darwin*) os_type="darwin" ;;
         *) error_exit "不支持的操作系统：$os_type" ;;
     esac
 
-    # Ensure version_to_install has 'v' prefix
     [[ "$version_to_install" != v* ]] && version_to_install="v$version_to_install"
-    filename_version="${version_to_install#v}" # Remove 'v' for filename construction
+    filename_version="${version_to_install#v}"
     download_url="https://github.com/${DDNS_GO_GH_REPO}/releases/download/${version_to_install}/ddns-go_${filename_version}_${os_type}_${arch}.tar.gz"
 
     temp_dir=$(mktemp -d) || error_exit "无法创建临时目录。"
@@ -302,20 +300,20 @@ install_ddns_go_core() {
     end_time=$(date +%s)
 
     time_cost=$((end_time - start_time))
-    ((time_cost == 0)) && time_cost=1 # Avoid division by zero
+    ((time_cost == 0)) && time_cost=1
 
     file_size_human=$(du -sh "$tarball_path" | cut -f1)
     file_bytes=$(stat -c %s "$tarball_path" 2>/dev/null || stat -f %z "$tarball_path" 2>/dev/null || echo 0)
 
     if (( file_bytes > 0 && time_cost > 0 )); then
-        avg_speed_bps=$((file_bytes / time_cost)) # Bytes per second
-        if (( avg_speed_bps > 1024 * 1024 )); then # MB/s
+        avg_speed_bps=$((file_bytes / time_cost))
+        if (( avg_speed_bps > 1024 * 1024 )); then
             avg_speed=$(bc <<< "scale=2; ${avg_speed_bps} / (1024 * 1024)")
             speed_unit="MB/s"
-        elif (( avg_speed_bps > 1024 )); then # KB/s
+        elif (( avg_speed_bps > 1024 )); then
             avg_speed=$(bc <<< "scale=2; ${avg_speed_bps} / 1024")
             speed_unit="KB/s"
-        else # B/s
+        else
             avg_speed="$avg_speed_bps"
             speed_unit="B/s"
         fi
@@ -335,17 +333,15 @@ install_ddns_go_core() {
         error_exit "解压后未找到 ${DDNS_GO_BIN_NAME} 执行文件于 ${temp_dir}。"
     fi
 
-    # Ensure installation directory exists
     local install_dir
     install_dir=$(dirname "${DDNS_GO_BIN_PATH}")
     info "确保安装目录 ${install_dir} 存在..."
     sudo mkdir -p "$install_dir" || error_exit "创建安装目录 ${install_dir} 失败。"
 
-    # Stop service if running, before replacing binary
     if systemctl is-active --quiet "${DDNS_GO_BIN_NAME}.service"; then
         info "正在停止现有的 ddns-go 服务..."
         sudo systemctl stop "${DDNS_GO_BIN_NAME}.service" || warn "停止服务失败，可能影响更新。"
-        sleep 1 # Give service time to stop
+        sleep 1
     fi
 
     info "正在将 ${new_binary_path_temp} 安装到 ${DDNS_GO_BIN_PATH}..."
@@ -355,66 +351,72 @@ install_ddns_go_core() {
     sudo chmod +x "${DDNS_GO_BIN_PATH}" || error_exit "设置 ${DDNS_GO_BIN_PATH} 执行权限失败。"
 
     success "ddns-go 已成功安装/更新到版本 ${version_to_install} (${DDNS_GO_BIN_PATH})。"
-    # Cleanup is handled by trap
-    rm -rf "${temp_dir}" # Explicitly remove temp_dir
-    trap - EXIT HUP INT QUIT TERM PIPE # Clear trap on successful completion
+    rm -rf "${temp_dir}"
+    trap - EXIT HUP INT QUIT TERM PIPE
 }
 
-# Configure and save ddns-go.conf
 save_ddns_go_config() {
     info "正在保存配置到 ${DDNS_GO_CONFIG_FILE}..."
-    # Ensure config directory exists
     sudo mkdir -p "$(dirname "${DDNS_GO_CONFIG_FILE}")" || error_exit "创建配置目录 $(dirname "${DDNS_GO_CONFIG_FILE}") 失败。"
 
-    # Create a temporary config file, then sudo mv to prevent permission issues with echo redirect
     local temp_conf_file
     temp_conf_file=$(mktemp) || error_exit "无法创建临时配置文件。"
 
-    # Write base config
     {
         echo "# DDNS-Go Configuration File managed by installer script v${SCRIPT_VERSION}"
         echo "PORT=${PORT}"
         echo "INTERVAL=${INTERVAL}"
-        echo "NOWEB=${NOWEB}" # 'true' or 'false'
-        echo "BIN_PATH=${DDNS_GO_BIN_PATH}" # Save the binary path used
+        echo "NOWEB=${NOWEB}"
+        echo "BIN_PATH=${DDNS_GO_BIN_PATH}"
     } > "$temp_conf_file"
 
-    # Change ownership and permissions before moving
     if id -u "${DDNS_GO_USER}" &>/dev/null; then
       sudo chown "${DDNS_GO_USER}:${DDNS_GO_USER}" "$temp_conf_file" || warn "设置临时配置文件所有权失败。"
     fi
-    sudo chmod 600 "$temp_conf_file" || warn "设置临时配置文件权限失败。" # Restrictive permissions
+    sudo chmod 600 "$temp_conf_file" || warn "设置临时配置文件权限失败。"
 
     if sudo mv "$temp_conf_file" "${DDNS_GO_CONFIG_FILE}"; then
         success "配置已保存到 ${DDNS_GO_CONFIG_FILE}。"
     else
-        rm -f "$temp_conf_file" # Clean up if mv failed
+        rm -f "$temp_conf_file"
         error_exit "保存配置文件 ${DDNS_GO_CONFIG_FILE} 失败。"
     fi
 }
 
-
-# Create or update systemd service file
 configure_systemd_service() {
     info "正在配置 systemd 服务 (${DDNS_GO_BIN_NAME}.service)..."
 
-    # Create ddns-go system user if it doesn't exist
+    if ! command -v systemctl &>/dev/null; then
+        error_exit "未找到 systemctl 命令。此脚本目前仅支持使用 systemd 的系统。"
+    fi
+
+    # 修复点：确保用户和组正确创建
     if ! id -u "${DDNS_GO_USER}" &>/dev/null; then
         info "正在创建系统用户 ${DDNS_GO_USER}..."
-        # Create a system user without a home dir by default, or a minimal one if needed by ddns-go
-        sudo useradd -r -s /bin/false -M "${DDNS_GO_USER}" || {
+        # 使用 -U 选项同时创建用户和组
+        sudo useradd -r -U -s /bin/false -M "${DDNS_GO_USER}" || {
             warn "创建用户 ${DDNS_GO_USER} 失败。将尝试以 root 运行服务 (不推荐)。"
-            DDNS_GO_USER="root" # Fallback to root if user creation fails
+            DDNS_GO_USER="root"
         }
     else
         info "系统用户 ${DDNS_GO_USER} 已存在。"
     fi
     
-    # Ensure config directory and file ownership is correct for the DDNS_GO_USER
+    # 确保用户组存在
+    if ! getent group "${DDNS_GO_USER}" &>/dev/null; then
+        info "创建用户组 ${DDNS_GO_USER}..."
+        sudo groupadd "${DDNS_GO_USER}" || warn "创建用户组 ${DDNS_GO_USER} 失败。"
+    fi
+    
+    # 确保用户属于该组
+    if ! id -nG "${DDNS_GO_USER}" | grep -qw "${DDNS_GO_USER}"; then
+        info "将用户 ${DDNS_GO_USER} 添加到组 ${DDNS_GO_USER}..."
+        sudo usermod -aG "${DDNS_GO_USER}" "${DDNS_GO_USER}" || warn "将用户添加到组失败。"
+    fi
+    
     if [[ "${DDNS_GO_USER}" != "root" ]]; then
-        sudo mkdir -p "$(dirname "${DDNS_GO_CONFIG_FILE}")" # Ensure directory exists
+        sudo mkdir -p "$(dirname "${DDNS_GO_CONFIG_FILE}")"
         sudo chown -R "${DDNS_GO_USER}:${DDNS_GO_USER}" "$(dirname "${DDNS_GO_CONFIG_FILE}")" || warn "设置配置目录所有权失败。"
-        # If config file exists, set its ownership too
         if [[ -f "${DDNS_GO_CONFIG_FILE}" ]]; then
              sudo chown "${DDNS_GO_USER}:${DDNS_GO_USER}" "${DDNS_GO_CONFIG_FILE}" || warn "设置配置文件所有权失败。"
         fi
@@ -423,12 +425,10 @@ configure_systemd_service() {
     local noweb_param=""
     [[ "${NOWEB}" == "true" ]] && noweb_param="-noweb"
 
-    # Using DDNS_GO_CONFIG_FILE for -c parameter
+    # 修复点：简化服务文件配置
     local exec_start_cmd="${DDNS_GO_BIN_PATH} ${noweb_param} -l :${PORT} -f ${INTERVAL} -c ${DDNS_GO_CONFIG_FILE}"
     debug "Service ExecStart command: ${exec_start_cmd}"
 
-    # Create service file content
-    # Use a temporary file for cat > HEREDOC then sudo mv
     local temp_service_file
     temp_service_file=$(mktemp) || error_exit "无法创建临时服务文件。"
 
@@ -442,16 +442,13 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=${DDNS_GO_USER}
-Group=${DDNS_GO_USER} # Or primary group of DDNS_GO_USER
+Group=${DDNS_GO_USER}
 ExecStart=${exec_start_cmd}
 Restart=on-failure
 RestartSec=30s
 TimeoutStopSec=60s
-StandardOutput=journal # Log to systemd journal
-StandardError=journal  # Log to systemd journal
-# Consider a WorkingDirectory if ddns-go needs one, e.g., for relative paths in its own config
-# WorkingDirectory=/var/lib/ddns-go # Example, ensure this dir exists and user has access
-# AmbientCapabilities=CAP_NET_BIND_SERVICE # If non-root user needs to bind to privileged ports (<1024) - not typical for ddns-go default port
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -461,7 +458,7 @@ EOF
         rm -f "$temp_service_file"
         error_exit "写入服务文件 ${SERVICE_FILE} 失败。"
     fi
-    sudo chmod 644 "${SERVICE_FILE}" # Standard permission for service files
+    sudo chmod 644 "${SERVICE_FILE}"
 
     info "正在重载 systemd 配置并启用/重启服务..."
     sudo systemctl daemon-reload || error_exit "systemctl daemon-reload 失败。"
@@ -474,22 +471,20 @@ EOF
     fi
 }
 
-# --- Main Installation Workflow ---
 prompt_for_install_settings() {
     info "开始配置 DDNS-Go 安装参数..."
     local input_port input_interval input_noweb_choice
     
-    # Port
     while true; do
         read -r -p "请输入 DDNS-Go Web 界面监听端口 [默认 ${PORT}]: " input_port
         input_port=${input_port:-$PORT}
         if [[ "$input_port" =~ ^[0-9]+$ && "$input_port" -ge 1 && "$input_port" -le 65535 ]]; then
             if ss -tuln | grep -q ":${input_port}\s" && [[ "$(uname -s)" == "Linux" ]]; then
                  warn "端口 ${input_port} 当前似乎已被占用。确定要继续使用吗？(y/N)"
-                 read -r -n 1 -t 10 reply_port_confirm || reply_port_confirm="n" # Timeout to 'n'
+                 read -r -n 1 -t 10 reply_port_confirm || reply_port_confirm="n"
                  echo
                  [[ "$reply_port_confirm" =~ ^[Yy]$ ]] && PORT="$input_port" && break
-                 continue # Ask again
+                 continue
             fi
             PORT="$input_port"
             break
@@ -499,7 +494,6 @@ prompt_for_install_settings() {
     done
     debug "监听端口设置为: ${PORT}"
 
-    # Interval
     while true; do
         read -r -p "请输入 DNS 同步间隔（秒）[默认 ${INTERVAL}, 最小 60]: " input_interval
         input_interval=${input_interval:-$INTERVAL}
@@ -512,7 +506,6 @@ prompt_for_install_settings() {
     done
     debug "同步间隔设置为: ${INTERVAL}s"
 
-    # NoWeb
     read -r -p "是否在启动时禁用 Web 管理界面 (更安全)? [y/N, 默认 N (启用Web)]: " -n 1 input_noweb_choice
     echo
     if [[ "$input_noweb_choice" =~ ^[Yy]$ ]]; then
@@ -527,7 +520,7 @@ prompt_for_install_settings() {
 
 select_ddns_go_version() {
     local available_versions selected_version latest_version
-    available_versions=$(fetch_available_versions) || return 1 # Exit if fetch fails
+    available_versions=$(fetch_available_versions) || return 1
     latest_version=$(echo "$available_versions" | head -n 1)
 
     info "最新可用 DDNS-Go 版本: ${latest_version}"
@@ -541,7 +534,6 @@ select_ddns_go_version() {
             info "将安装最新版本: ${selected_version}"
             break
         fi
-        # Ensure 'v' prefix if user omits it but it's in the list like that
         if [[ "$selected_version" != v* ]] && echo "$available_versions" | grep -q "v${selected_version}"; then
             selected_version="v$selected_version"
         fi
@@ -549,47 +541,55 @@ select_ddns_go_version() {
         if validate_version_exists "$selected_version"; then
             break
         fi
-        # validate_version_exists already prints error, no need to repeat
     done
-    echo "$selected_version" # Return selected version
+    echo "$selected_version"
 }
 
 main_install_sequence() {
     info "开始 DDNS-Go 安装流程..."
     check_root
-    install_dependencies # Install curl, tar, jq, bc
+    install_dependencies
 
     prompt_for_install_settings
 
     local version_to_install
     version_to_install=$(select_ddns_go_version) || error_exit "未能选择有效的 DDNS-Go 版本。"
     
-    # Global BIN_PATH might be changed by user, stick to the default install dir for updates unless advanced
-    # For simplicity, this script updates to BIN_PATH_DEFAULT. Advanced users can manage custom paths.
-    DDNS_GO_BIN_PATH="${BIN_PATH_DEFAULT}"
-    BIN_PATH="${BIN_PATH_DEFAULT}" # Update global
+    DDNS_GO_BIN_PATH="${BIN_PATH_DEFAULT}" 
+    BIN_PATH="${BIN_PATH_DEFAULT}"
     info "DDNS-Go 将被安装到: ${DDNS_GO_BIN_PATH}"
 
-    install_ddns_go_core "$version_to_install" # Installs/updates binary
-    # Config (PORT, INTERVAL, NOWEB) should persist from loaded values or defaults
-    save_ddns_go_config # Re-save config to ensure BIN_PATH is correct if it changed
-    configure_systemd_service # Re-configure and restart service with new binary
+    install_ddns_go_core "$version_to_install"
+    save_ddns_go_config
+    configure_systemd_service
 
-    success "DDNS-Go 程序已更新到 ${version_to_install}。"
-    read -r -n 1 -s -p "按任意键继续..."
-    echo
+    success "DDNS-Go 安装流程完成！"
+    info "访问Web界面 (如果启用): http://<你的服务器IP>:${PORT}"
+    info "管理脚本 (如果由此脚本安装): sudo ${MANAGER_INSTALL_PATH}"
+
+    if [[ "${SCRIPT_FILENAME}" != "$(basename "${MANAGER_INSTALL_PATH}")" ]]; then
+        info "正在创建/更新管理命令 ${MANAGER_INSTALL_PATH}..."
+        if sudo cp "$0" "${MANAGER_INSTALL_PATH}" && sudo chmod +x "${MANAGER_INSTALL_PATH}"; then
+            success "管理命令已链接到 ${MANAGER_INSTALL_PATH}"
+        else
+            warn "创建管理命令 ${MANAGER_INSTALL_PATH} 失败。"
+        fi
+    fi
 }
 
-# --- Management Menu Functions ---
 show_ddns_go_status() {
     clear
     info "DDNS-Go 服务状态信息"
-    determine_paths_and_load_config # Load current config
+    determine_paths_and_load_config
 
-    local local_ddns_version
-    local_ddns_version=$(get_local_ddns_go_version)
-    echo -e "  程序版本: ${GREEN}${local_ddns_version}${NC}"
-    echo -e "  安装路径: ${YELLOW}${DDNS_GO_BIN_PATH}${NC}"
+    local local_version="未知"
+    if [[ -x "${DDNS_GO_BIN_PATH}" ]]; then
+        local_version=$(get_local_ddns_go_version)
+        echo -e "  程序版本: ${GREEN}${local_version}${NC}"
+        echo -e "  安装路径: ${YELLOW}${DDNS_GO_BIN_PATH}${NC}"
+    else
+        echo -e "  程序版本: ${RED}未找到或路径无效 (${DDNS_GO_BIN_PATH})${NC}"
+    fi
     echo -e "  配置文件: ${YELLOW}${DDNS_GO_CONFIG_FILE}${NC}"
     echo -e "  监听端口: ${GREEN}${PORT}${NC}"
     echo -e "  同步间隔: ${GREEN}${INTERVAL}s${NC}"
@@ -619,7 +619,7 @@ show_ddns_go_status() {
 update_ddns_go_program() {
     info "开始更新 DDNS-Go 程序..."
     check_root
-    determine_paths_and_load_config # Ensure paths and current config are loaded
+    determine_paths_and_load_config
 
     local current_version="未安装"
     if [[ -x "${DDNS_GO_BIN_PATH}" ]]; then current_version=$(get_local_ddns_go_version); fi
@@ -636,13 +636,9 @@ update_ddns_go_program() {
     
     local prompt_msg="发现新版本 ${latest_version} (当前: ${current_version}). 是否更新? [Y/n]: "
     if [[ "$current_version" != "未安装" ]] && [[ "$current_version" != "版本未知" ]]; then
-      # Basic version comparison (does not handle complex pre-releases well)
-      # If latest_version is numerically greater than current_version
       if [[ "$(printf '%s\n' "$latest_version" "$current_version" | sed 's/v//g' | sort -V | head -n 1)" == "$(echo "$current_version" | sed 's/v//g')" && "$latest_version" != "$current_version" ]]; then
-        # Latest version is greater
-        : # Standard update prompt
+        : 
       else 
-        # Current version is greater or equal (or non-standard format)
         prompt_msg="最新版本 ${latest_version} 不高于当前版本 ${current_version}。确定要 '更新' (可能降级或重装)? [y/N]: "
       fi
     fi
@@ -670,7 +666,7 @@ update_ddns_go_program() {
 toggle_webui() {
     info "切换 Web UI 状态..."
     check_root
-    determine_paths_and_load_config # Load current config
+    determine_paths_and_load_config
 
     if [[ "$NOWEB" == "true" ]]; then
         NOWEB="false"
@@ -679,8 +675,8 @@ toggle_webui() {
         NOWEB="true"
         success "Web UI 已设置为: 禁用 (将在服务重启后生效)。"
     fi
-    save_ddns_go_config # Save new NOWEB state
-    configure_systemd_service # Restart service to apply
+    save_ddns_go_config
+    configure_systemd_service
     read -r -n 1 -s -p "操作完成。按任意键继续..."
     echo
 }
@@ -704,19 +700,18 @@ uninstall_ddns_go() {
         sudo rm -f "${SERVICE_FILE}" || warn "删除服务文件失败。"
     fi
     sudo systemctl daemon-reload
-    sudo systemctl reset-failed # Clear failed state if any
+    sudo systemctl reset-failed
 
-    if [[ -x "${DDNS_GO_BIN_PATH}" ]]; then # Use the determined/configured path
+    if [[ -x "${DDNS_GO_BIN_PATH}" ]]; then
         info "正在删除 ddns-go 二进制文件: ${DDNS_GO_BIN_PATH}"
         sudo rm -f "${DDNS_GO_BIN_PATH}" || warn "删除二进制文件失败。"
     else
         info "未找到 ddns-go 二进制文件于 ${DDNS_GO_BIN_PATH}。"
     fi
 
-    if [[ -f "${DDNS_GO_CONFIG_FILE}" ]]; then # Use the determined/configured path
+    if [[ -f "${DDNS_GO_CONFIG_FILE}" ]]; then
         info "正在删除配置文件: ${DDNS_GO_CONFIG_FILE}"
         sudo rm -f "${DDNS_GO_CONFIG_FILE}" || warn "删除配置文件失败。"
-        # Also remove the config directory if it's the default one and now empty
         if [[ "$(dirname "${DDNS_GO_CONFIG_FILE}")" == "${CONFIG_DIR_DEFAULT}" ]]; then
             if [[ -z "$(ls -A "${CONFIG_DIR_DEFAULT}" 2>/dev/null)" ]]; then
                 info "正在删除空的配置目录: ${CONFIG_DIR_DEFAULT}"
@@ -729,10 +724,11 @@ uninstall_ddns_go() {
         info "未找到配置文件于 ${DDNS_GO_CONFIG_FILE}。"
     fi
     
-    # Attempt to remove the ddns-go user if it exists and was created by this script logic
     if id -u "${DDNS_GO_USER}" &>/dev/null && [[ "${DDNS_GO_USER}" != "root" ]]; then
         info "正在尝试删除系统用户 ${DDNS_GO_USER}..."
         sudo userdel "${DDNS_GO_USER}" 2>/dev/null || warn "删除用户 ${DDNS_GO_USER} 失败。"
+        info "正在尝试删除用户组 ${DDNS_GO_USER}..."
+        sudo groupdel "${DDNS_GO_USER}" 2>/dev/null || warn "删除用户组 ${DDNS_GO_USER} 失败。"
     fi
 
     if [[ -f "${MANAGER_INSTALL_PATH}" ]]; then
@@ -810,7 +806,6 @@ self_update_script() {
     fi
 }
 
-# --- Main Menu Logic ---
 main_menu() {
     check_root
     determine_paths_and_load_config
@@ -849,20 +844,19 @@ main_menu() {
     done
 }
 
-# --- Script Execution Entry Point ---
 main() {
-    # 首先检查root权限
-    check_root
-    
-    # 安装所有必要的依赖
+    for cmd in curl tar; do
+        if ! command -v "$cmd" &>/dev/null; then
+            error_exit "必需命令 '$cmd' 未找到。请先安装它。"
+        fi
+    done
     install_dependencies
 
-    # 根据脚本名称判断运行模式
     if [[ "${SCRIPT_FILENAME}" == "$(basename "${MANAGER_INSTALL_PATH}")" ]]; then
-        debug "以管理模式运行。"
+        debug "以管理模式 (${MANAGER_INSTALL_PATH}) 运行。"
         main_menu
     else
-        debug "以安装模式运行。"
+        debug "以安装模式 (${SCRIPT_FILENAME}) 运行。"
         if check_ddns_go_installed; then
             warn "检测到已安装的 DDNS-Go (版本: $(get_local_ddns_go_version))."
             echo -e "  路径: ${YELLOW}${DDNS_GO_BIN_PATH}${NC}"
@@ -890,5 +884,4 @@ main() {
     exit 0
 }
 
-# --- Call main function ---
 main "$@"
