@@ -1,124 +1,89 @@
 #!/bin/bash
-# Script Version: 1.2.5-rootfix
-# Fully removed sudo dependencies
+# DDNS-Go安装脚本（修复404问题）
+# 适用于没有sudo的环境
 
-# --- Strict Mode ---
-set -e
-set -o pipefail
+# 基本配置
+DDNS_GO_GH_REPO="jeessy2/ddns-go"
+INSTALL_DIR="/usr/local/bin"
+CONFIG_DIR="/etc/ddns-go"
 
-# --- Colors ---
+# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# --- Configuration ---
-DDNS_GO_GH_REPO="jeessy2/ddns-go"
-INSTALL_DIR="/usr/local/bin"
-BIN_NAME="ddns-go"
-BIN_PATH="${INSTALL_DIR}/${BIN_NAME}"
-CONFIG_DIR="/etc/ddns-go"
-CONFIG_FILE="${CONFIG_DIR}/ddns-go.conf"
-SERVICE_FILE="/etc/systemd/system/ddns-go.service"
-DDNS_USER="ddns-go"
-
-# --- Utility Functions ---
+# 日志函数
 log() {
-    local type="$1" msg="$2"
-    case "$type" in
-        INFO) color="${BLUE}" ;;
-        SUCCESS) color="${GREEN}" ;;
-        WARN) color="${YELLOW}" ;;
-        ERROR) color="${RED}" ;;
-        *) color="${NC}" ;;
-    esac
-    echo -e "${color}[$(date +'%Y-%m-%d %H:%M:%S')] [${type}] ${msg}${NC}" >&2
+    echo -e "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
 }
 
-die() { log "ERROR" "$1"; exit 1; }
-
-# --- Dependency Check ---
+# 依赖检查
 check_deps() {
     for cmd in curl tar jq; do
         if ! command -v "$cmd" >/dev/null; then
-            log "INFO" "正在安装依赖: $cmd"
-            apt-get update -y && apt-get install -y "$cmd" || die "无法安装 $cmd"
+            log "${YELLOW}正在安装依赖: $cmd${NC}"
+            apt-get update && apt-get install -y "$cmd" || {
+                log "${RED}无法安装 $cmd${NC}"
+                exit 1
+            }
         fi
     done
 }
 
-# --- Installation ---
-install_ddns_go() {
-    # Get latest version
-    log "INFO" "正在获取最新版本..."
+# 安装流程
+install() {
+    check_deps
+    
+    log "${GREEN}正在获取最新版本...${NC}"
     latest_version=$(curl -s "https://api.github.com/repos/${DDNS_GO_GH_REPO}/releases/latest" | jq -r '.tag_name')
-    [ -z "$latest_version" ] && die "无法获取最新版本"
+    [ -z "$latest_version" ] && {
+        log "${RED}无法获取最新版本${NC}"
+        exit 1
+    }
 
-    # Prepare temp directory
+    # 确定系统架构
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64) arch="x86_64" ;;
+        armv7l) arch="armv7" ;;
+        aarch64) arch="arm64" ;;
+        *) arch="x86_64" ;;
+    esac
+
+    # 创建临时目录
     temp_dir=$(mktemp -d)
     trap 'rm -rf "$temp_dir"' EXIT
 
-    # Download and extract
-    log "INFO" "正在下载 ${latest_version}..."
-    arch=$(uname -m)
-    case "$arch" in
-        x86_64) arch="amd64" ;;
-        arm*) arch="arm" ;;
-        *) arch="amd64" ;;
-    esac
-    
-    download_url="https://github.com/${DDNS_GO_GH_REPO}/releases/download/${latest_version}/ddns-go_${latest_version#v}_linux_${arch}.tar.gz"
-    curl -fL "$download_url" -o "${temp_dir}/ddns-go.tar.gz" || die "下载失败"
-    
-    log "INFO" "正在解压..."
-    tar xzf "${temp_dir}/ddns-go.tar.gz" -C "$temp_dir" || die "解压失败"
-    
-    # Install binary
-    log "INFO" "正在安装到 ${BIN_PATH}"
-    mkdir -p "${INSTALL_DIR}"
-    mv "${temp_dir}/ddns-go" "${BIN_PATH}"
-    chmod +x "${BIN_PATH}"
+    # 尝试两种URL格式
+    for url_format in \
+        "https://github.com/${DDNS_GO_GH_REPO}/releases/download/${latest_version}/ddns-go_${latest_version#v}_Linux_${arch}.tar.gz" \
+        "https://github.com/${DDNS_GO_GH_REPO}/releases/download/${latest_version}/ddns-go_${latest_version#v}_linux_${arch}.tar.gz"
+    do
+        log "${YELLOW}尝试下载: $url_format${NC}"
+        if curl -fL "$url_format" -o "${temp_dir}/ddns-go.tar.gz"; then
+            log "${GREEN}下载成功${NC}"
+            break
+        fi
+    done
 
-    # Create config
-    log "INFO" "正在创建配置文件..."
-    mkdir -p "${CONFIG_DIR}"
-    cat > "${CONFIG_FILE}" <<EOF
-PORT=9876
-INTERVAL=300
-NOWEB=false
-EOF
+    [ ! -f "${temp_dir}/ddns-go.tar.gz" ] && {
+        log "${RED}所有下载尝试均失败${NC}"
+        exit 1
+    }
 
-    # Create service user
-    if ! id "${DDNS_USER}" &>/dev/null; then
-        useradd -r -s /bin/false "${DDNS_USER}"
-    fi
-    chown -R "${DDNS_USER}:${DDNS_USER}" "${CONFIG_DIR}"
+    # 解压和安装
+    tar xzf "${temp_dir}/ddns-go.tar.gz" -C "$temp_dir"
+    mkdir -p "$INSTALL_DIR"
+    mv "${temp_dir}/ddns-go" "$INSTALL_DIR/"
+    chmod +x "$INSTALL_DIR/ddns-go"
 
-    # Create systemd service
-    log "INFO" "正在创建系统服务..."
-    cat > "${SERVICE_FILE}" <<EOF
-[Unit]
-Description=DDNS-Go Service
-After=network.target
+    # 创建配置文件
+    mkdir -p "$CONFIG_DIR"
+    echo -e "PORT=9876\nINTERVAL=300" > "$CONFIG_DIR/config.yaml"
 
-[Service]
-User=${DDNS_USER}
-ExecStart=${BIN_PATH} -l :9876 -f 300 -c ${CONFIG_FILE}
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable ddns-go
-    systemctl start ddns-go
-
-    log "SUCCESS" "安装完成！"
-    echo -e "访问管理界面: ${GREEN}http://<你的IP>:9876${NC}"
+    log "${GREEN}安装完成！${NC}"
+    echo -e "运行命令: ${INSTALL_DIR}/ddns-go -l :9876 -f 300 -c ${CONFIG_DIR}/config.yaml"
 }
 
-# --- Main ---
-check_deps
-install_ddns_go
+install
